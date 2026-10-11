@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft, Check, ChevronLeft, ChevronRight, Download, Lock, Minus, MousePointer2,
-  Plus, Redo2, SlidersHorizontal, Stamp as StampIcon, Trash2, Undo2, Volume2, VolumeX, Sparkles, History,
+  CopyPlus, Plus, Redo2, SlidersHorizontal, Stamp as StampIcon, Trash2, Undo2, Upload, Volume2, VolumeX, Sparkles, History, X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/lib/ui/badge";
@@ -22,6 +22,7 @@ import { Mascot } from "@/components/Mascot";
 import { StampSurface, type StampInstance } from "@/components/StampSurface";
 import { StampThumb } from "@/components/StampThumb";
 import { ensureStampFonts, stampSize } from "@/lib/stamp/engine";
+import { processStampUpload, getCustomImage, removeCustomImage } from "@/lib/stamp/customImages";
 import {
   BORDER_LABELS, COLOR_LABELS, FONT_LABELS, SEAL_STYLE_LABELS, SHAPE_LABELS, STAMP_COLORS,
   TEXTURE_LABELS, type StampBorder, type StampColor, type StampFont, type StampShape, type StampText,
@@ -32,7 +33,7 @@ import {
 } from "@/lib/stamp/templates";
 import {
   downloadBytes, exportStampedPdf, exportStampedPdfRasterized, loadPdf, PasswordRequiredError,
-  renderPageToCanvas, stampedFileName, type LoadedPdf, type PageScope,
+  renderPageToCanvas, stampedFileName, type LoadedPdf, type PageScope, type PlacedStampLike,
 } from "@/lib/pdf";
 import { canvasToBlob, renderStampsOnImage } from "@/lib/export-image";
 import { playStampSound, setMuted } from "@/lib/sound";
@@ -77,6 +78,10 @@ export function Editor({ doc, onBack, initialTemplateKey }: { doc: EditorDoc; on
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [fontTick, setFontTick] = useState(0);
   const [panelOpen, setPanelOpen] = useState(false);
+  // 自定义印章（上传的图片章）：id 列表 + 当前手持的自定义章
+  const [customIds, setCustomIds] = useState<string[]>([]);
+  const [activeCustomId, setActiveCustomId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const pristineBytes = useRef<ArrayBuffer | null>(null); // pdf.js 会转移 buffer，给 pdf-lib 留一份
   const pageCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -211,32 +216,38 @@ export function Editor({ doc, onBack, initialTemplateKey }: { doc: EditorDoc; on
 
   // ---------- 落章 / 编辑 ----------
   const active = useMemo<StampTextPlus>(() => {
+    if (activeCustomId) {
+      const ci = getCustomImage(activeCustomId);
+      if (ci) return { image: { imageId: ci.id, w: ci.boxW, h: ci.boxH } };
+    }
     const id = makeStampID();
     return { text: stampTextOf(editorStamp.statement, editorStamp.design, id), design: editorStamp.design };
     // fontTick：Web 字体就绪后重排一次
-  }, [editorStamp, fontTick]);
+  }, [editorStamp, fontTick, activeCustomId]);
 
   const handleStamp = useCallback(
     (relX: number, relY: number) => {
       const stampID = makeStampID();
+      const custom = activeCustomId ? getCustomImage(activeCustomId) : null;
       const inst: StampInstance = {
         id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
         stampID,
         relX, relY,
         mult,
-        rotation: editorStamp.design.rotation,
+        rotation: custom ? 0 : editorStamp.design.rotation,
         text: stampTextOf(editorStamp.statement, editorStamp.design, stampID),
         design: { ...editorStamp.design },
+        ...(custom ? { image: { imageId: custom.id, w: custom.boxW, h: custom.boxH } } : {}),
       };
       setPagesStamps((m) => ({ ...m, [page]: [...(m[page] ?? []), inst] }));
-      setHistory((h) => [{ id: stampID, time: new Date(), page, templateName: editorStamp.design.name, file: doc.file.name }, ...h].slice(0, 60));
+      setHistory((h) => [{ id: stampID, time: new Date(), page, templateName: custom ? `${custom.name}（自定义）` : editorStamp.design.name, file: doc.file.name }, ...h].slice(0, 60));
       playStampSound();
       toast(`No.${stampID}`, {
         description: `${editorStamp.design.name} · 第 ${page} 页`,
         duration: 1800,
       });
     },
-    [editorStamp, mult, page, doc.file.name],
+    [editorStamp, mult, page, doc.file.name, activeCustomId],
   );
 
   const moveStamp = useCallback(
@@ -259,6 +270,59 @@ export function Editor({ doc, onBack, initialTemplateKey }: { doc: EditorDoc; on
       setSelectedId((cur) => (cur === id ? null : cur));
     },
     [page],
+  );
+
+  /** 把当前页的章复制到全部页面（其它页已有的章会被替换） */
+  const copyToAllPages = useCallback(() => {
+    const cur = pagesStamps[page] ?? [];
+    if (!cur.length) {
+      toast.error("这一页还没有章");
+      return;
+    }
+    if (numPages < 2) return;
+    setPagesStamps((m) => {
+      const next = { ...m };
+      for (let pno = 1; pno <= numPages; pno++) {
+        if (pno === page) continue;
+        next[pno] = cur.map((s, i) => ({ ...s, id: `${s.id}-c${pno}-${i}` }));
+      }
+      return next;
+    });
+    toast.success(`已复制到全部页面`, { description: `当前页的 ${cur.length} 枚章已盖到其余 ${numPages - 1} 页（可再单独调整）` });
+  }, [pagesStamps, page, numPages]);
+
+  const uploadCustomStamp = useCallback(
+    async (file: File) => {
+      setUploading(true);
+      try {
+        const ci = await processStampUpload(file);
+        setCustomIds((ids) => (ids.includes(ci.id) ? ids : [...ids, ci.id]));
+        setActiveCustomId(ci.id); // 传完直接拿在手里
+        toast.success("印章已就位", { description: `${ci.name} · 显示约 ${ci.boxW.toFixed(0)}×${ci.boxH.toFixed(0)}mm，滚轮可调` });
+      } catch (e) {
+        toast.error("图片读不出来", { description: String((e as Error)?.message ?? e) });
+      } finally {
+        setUploading(false);
+      }
+    },
+    [],
+  );
+
+  const removeCustomStamp = useCallback(
+    (id: string) => {
+      removeCustomImage(id);
+      setCustomIds((ids) => ids.filter((x) => x !== id));
+      setActiveCustomId((cur) => (cur === id ? null : cur));
+      // 同时清掉页面上已盖的该印章
+      setPagesStamps((m) => {
+        const next: Record<number, StampInstance[]> = {};
+        for (const [pno, list] of Object.entries(m)) {
+          next[Number(pno)] = list.filter((x) => x.image?.imageId !== id);
+        }
+        return next;
+      });
+    },
+    [],
   );
 
   const undo = useCallback(() => {
@@ -301,10 +365,19 @@ export function Editor({ doc, onBack, initialTemplateKey }: { doc: EditorDoc; on
       toast.error("这一页还没有章", { description: "先在纸上盖几枚，再来导出。" });
       return;
     }
+    // 每页各自的章（含「复制到全部页面」得到的副本）
+    const pagesMap = new Map<number, PlacedStampLike[]>();
+    for (const [pno, list] of Object.entries(pagesStamps)) {
+      if (!list.length) continue;
+      pagesMap.set(Number(pno), list);
+    }
     setExporting(true);
     try {
+      const exportStamps = scope === "each"
+        ? [...pagesMap.values()].flat()
+        : currentStamps;
       if (doc.kind === "image" && bitmap) {
-        const canvas = renderStampsOnImage(bitmap, currentStamps);
+        const canvas = renderStampsOnImage(bitmap, exportStamps);
         const blob = await canvasToBlob(canvas, "image/png");
         downloadBytes(await blob.arrayBuffer(), stampedFileName(doc.file.name, "png"), "image/png");
         toast.success("副本已下载", { description: stampedFileName(doc.file.name, "png") });
@@ -320,10 +393,10 @@ export function Editor({ doc, onBack, initialTemplateKey }: { doc: EditorDoc; on
         lossless = false;
       }
       const out = lossless
-        ? await exportStampedPdf(pristineBytes.current, currentStamps, opts)
+        ? await exportStampedPdf(pristineBytes.current, pagesMap, opts)
         : await exportStampedPdfRasterized(
             { doc: pdf!.doc, numPages, pageSize } as LoadedPdf,
-            currentStamps,
+            pagesMap,
             opts,
           );
       downloadBytes(out, stampedFileName(doc.file.name, "pdf"), "application/pdf");
@@ -340,6 +413,7 @@ export function Editor({ doc, onBack, initialTemplateKey }: { doc: EditorDoc; on
 
   const scopeLabel: Record<PageScope, string> = {
     current: "仅当前页",
+    each: "各页各自的章",
     all: "每一页同位置",
     first: "仅第一页",
     last: "仅最后一页",
@@ -381,6 +455,7 @@ export function Editor({ doc, onBack, initialTemplateKey }: { doc: EditorDoc; on
           onExport={exportFile}
           stampCount={stamps.length}
           onTogglePanel={() => setPanelOpen((v) => !v)}
+          onCopyToAllPages={copyToAllPages}
         />
 
         <div className="flex min-h-0 flex-1">
@@ -444,6 +519,12 @@ export function Editor({ doc, onBack, initialTemplateKey }: { doc: EditorDoc; on
               onClearHistory={() => setHistory([])}
               fileName={doc.file.name}
               fileSize={doc.file.size}
+              customIds={customIds}
+              activeCustomId={activeCustomId}
+              onSelectCustom={(id) => setActiveCustomId((cur) => (cur === id ? null : id))}
+              onUploadCustom={uploadCustomStamp}
+              onRemoveCustom={removeCustomStamp}
+              uploading={uploading}
             />
           </aside>
         </div>
@@ -477,7 +558,7 @@ export function Editor({ doc, onBack, initialTemplateKey }: { doc: EditorDoc; on
   );
 }
 
-type StampTextPlus = { text: StampText; design: EditorStamp["design"] };
+type StampTextPlus = { text?: StampText; design?: EditorStamp["design"]; image?: { imageId: string; w: number; h: number } };
 
 function PageBtn({ children, ...props }: React.ComponentProps<"button">) {
   return (
@@ -518,6 +599,7 @@ interface TopBarProps {
   onExport: () => void;
   stampCount: number;
   onTogglePanel: () => void;
+  onCopyToAllPages: () => void;
 }
 
 function TopBar(p: TopBarProps) {
@@ -567,6 +649,12 @@ function TopBar(p: TopBarProps) {
 
       <Separator orientation="vertical" className="mx-1 !h-7" />
 
+      {p.isPdf && p.numPages > 1 && (
+        <Button variant="ghost" size="sm" onClick={p.onCopyToAllPages} disabled={!p.canUndo} title="把当前页的章复制到全部页面">
+          <CopyPlus className="!h-4 !w-4" />
+          <span className="hidden xl:inline">复制到全部页</span>
+        </Button>
+      )}
       <Button variant="ghost" size="icon" aria-label="撤销" onClick={p.undo} disabled={!p.canUndo}>
         <Undo2 />
       </Button>
@@ -615,6 +703,7 @@ function TopBar(p: TopBarProps) {
 
 function StampPanel({
   editorStamp, setEditorStamp, history, onClearHistory, fileName, fileSize,
+  customIds, activeCustomId, onSelectCustom, onUploadCustom, onRemoveCustom, uploading,
 }: {
   editorStamp: EditorStamp;
   setEditorStamp: (s: EditorStamp) => void;
@@ -622,6 +711,12 @@ function StampPanel({
   onClearHistory: () => void;
   fileName: string;
   fileSize: number;
+  customIds: string[];
+  activeCustomId: string | null;
+  onSelectCustom: (id: string) => void;
+  onUploadCustom: (file: File) => void;
+  onRemoveCustom: (id: string) => void;
+  uploading: boolean;
 }) {
   return (
     <Tabs defaultValue="content" className="flex min-h-0 flex-1 flex-col">
@@ -641,7 +736,16 @@ function StampPanel({
           <DesignTab editorStamp={editorStamp} setEditorStamp={setEditorStamp} />
         </TabsContent>
         <TabsContent value="templates" className="mt-0 px-4 py-4">
-          <TemplatesTab editorStamp={editorStamp} setEditorStamp={setEditorStamp} />
+          <TemplatesTab
+            editorStamp={editorStamp}
+            setEditorStamp={setEditorStamp}
+            customIds={customIds}
+            activeCustomId={activeCustomId}
+            onSelectCustom={onSelectCustom}
+            onUploadCustom={onUploadCustom}
+            onRemoveCustom={onRemoveCustom}
+            uploading={uploading}
+          />
         </TabsContent>
         <TabsContent value="history" className="mt-0 px-4 py-4">
           <HistoryTab history={history} onClear={onClearHistory} fileName={fileName} fileSize={fileSize} />
@@ -893,14 +997,106 @@ function LivePreview({ editorStamp }: { editorStamp: EditorStamp }) {
   );
 }
 
-function TemplatesTab({ editorStamp, setEditorStamp }: { editorStamp: EditorStamp; setEditorStamp: SetStamp }) {
+function TemplatesTab({
+  editorStamp, setEditorStamp, customIds, activeCustomId, onSelectCustom, onUploadCustom, onRemoveCustom, uploading,
+}: {
+  editorStamp: EditorStamp;
+  setEditorStamp: SetStamp;
+  customIds: string[];
+  activeCustomId: string | null;
+  onSelectCustom: (id: string) => void;
+  onUploadCustom: (file: File) => void;
+  onRemoveCustom: (id: string) => void;
+  uploading: boolean;
+}) {
   const [pending, setPending] = useState<string | null>(null);
+  const activeCustom = activeCustomId ? getCustomImage(activeCustomId) : null;
   return (
     <div>
       <p className="mb-3 flex items-start gap-1.5 text-[11px] leading-5 text-muted-foreground">
         <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary/70" />
         选一枚模板开始；「内容」和「设计」里改的都是你手里这枚章。
       </p>
+
+      {/* 自定义印章 */}
+      <div className="mb-4 rounded-lg border border-dashed border-primary/35 bg-accent/30 p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5 text-[13px] font-medium">
+              <Upload className="h-3.5 w-3.5 text-primary/80" />
+              自定义印章
+            </div>
+            <div className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+              上传印章图片（PNG / JPG）。白底扫描件自动转透明、自动裁边。
+            </div>
+          </div>
+          <label
+            className={cn(
+              "inline-flex h-8 shrink-0 cursor-pointer items-center rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground shadow-sm transition-all hover:bg-primary/90 active:scale-[0.98]",
+              uploading && "pointer-events-none opacity-60",
+            )}
+          >
+            {uploading ? "处理中…" : "选图片"}
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onUploadCustom(f);
+                e.target.value = "";
+              }}
+            />
+          </label>
+        </div>
+
+        {customIds.length > 0 && (
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            {customIds.map((id) => {
+              const ci = getCustomImage(id);
+              if (!ci) return null;
+              const active = id === activeCustomId;
+              return (
+                <div key={id} className={cn(
+                  "group relative rounded-lg border bg-card transition-all",
+                  active ? "border-primary/60 shadow-[0_0_0_2px_rgba(201,51,41,0.12)]" : "border-border/80",
+                )}>
+                  <button
+                    type="button"
+                    onClick={() => onSelectCustom(id)}
+                    title={active ? "手里正拿着这枚 —— 再点一下换回模板章" : "拿在手里"}
+                    className="flex w-full cursor-pointer flex-col items-center rounded-lg p-2"
+                  >
+                    <span className="flex h-[52px] items-center justify-center">
+                      <img src={ci.src} alt={ci.name} className="max-h-[52px] max-w-full object-contain" />
+                    </span>
+                    <span className="mt-1 w-full truncate text-center text-[11px] font-medium">{ci.name}</span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`删除 ${ci.name}`}
+                    onClick={(e) => { e.stopPropagation(); onRemoveCustom(id); }}
+                    className="absolute -right-1.5 -top-1.5 hidden h-5 w-5 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-sm hover:text-destructive group-hover:flex"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                  {active && (
+                    <span className="pointer-events-none absolute inset-x-2 -bottom-0.5 text-center text-[9px] font-medium text-primary">
+                      手里正拿着
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {activeCustom && (
+          <p className="mt-2.5 rounded-md bg-card px-2.5 py-1.5 text-[11px] text-muted-foreground">
+            手里正拿着「{activeCustom.name}」。落几枚后，点上面的模板即可换回模板章。
+          </p>
+        )}
+      </div>
+
       <div className="grid grid-cols-2 gap-2">
         {TEMPLATES.map((t) => (
           <button

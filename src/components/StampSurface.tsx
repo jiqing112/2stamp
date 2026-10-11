@@ -2,9 +2,16 @@
 // 章随鼠标走、滚轮调大小、点击落下、章永远完整留在纸里 —— 与原版交互一致。
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { drawLayerAt, renderStampLayer, stampBounds, stampSize } from "@/lib/stamp/engine";
+import { getCustomImageLayer } from "@/lib/stamp/customImages";
+import { drawLayerAt, renderStampLayer, stampSize } from "@/lib/stamp/engine";
 import type { StampDesign, StampText } from "@/lib/stamp/types";
 import { cn } from "@/lib/utils";
+
+export interface StampImage {
+  imageId: string; // customImages 里的 id
+  w: number; // 标称宽（pt，mult=1）
+  h: number;
+}
 
 export interface StampInstance {
   id: string;
@@ -15,11 +22,29 @@ export interface StampInstance {
   rotation: number; // 度，逆时针为正
   text: StampText;
   design: StampDesign;
+  /** 自定义印章图片；存在时优先用它渲染（text/design 不参与绘制） */
+  image?: StampImage;
 }
 
 export interface ActiveStamp {
-  text: StampText;
-  design: StampDesign;
+  text?: StampText;
+  design?: StampDesign;
+  /** 手持自定义印章；存在时优先用它渲染 */
+  image?: StampImage;
+}
+
+/** 实例/手持章的未旋转尺寸（pt） */
+export function stampSpecSize(st: { text?: StampText; design?: StampDesign; image?: StampImage }) {
+  return st.image ? { w: st.image.w, h: st.image.h } : stampSize(st.text!, st.design!);
+}
+/** 实例/手持章的旋转后外接尺寸（pt） */
+export function stampSpecBounds(st: { text?: StampText; design?: StampDesign; image?: StampImage; rotation?: number }) {
+  const { w, h } = stampSpecSize(st);
+  const a = ((st.rotation ?? 0) * Math.PI) / 180;
+  return {
+    w: Math.abs(w * Math.cos(a)) + Math.abs(h * Math.sin(a)),
+    h: Math.abs(w * Math.sin(a)) + Math.abs(h * Math.cos(a)),
+  };
 }
 
 interface Props {
@@ -147,7 +172,9 @@ export function StampSurface({
 
     // 已盖的章
     for (const st of s.stamps) {
-      const { canvas: layer, ppp: q } = getLayer(st.text, st.design, st.mult, ppp);
+      const { canvas: layer, ppp: q } = st.image
+        ? getCustomImageLayer(st.image.imageId, st.mult, ppp)
+        : getLayer(st.text, st.design, st.mult, ppp);
       ctx.save();
       ctx.translate(st.relX * s.pageW, st.relY * s.pageH);
       ctx.rotate((-st.rotation * Math.PI) / 180);
@@ -159,7 +186,7 @@ export function StampSurface({
     // 选中框 + 手柄
     const sel = s.stamps.find((x) => x.id === s.selectedId);
     if (sel && s.mode === "select") {
-      const size = stampSize(sel.text, sel.design);
+      const size = stampSpecSize(sel);
       const w = size.w * sel.mult, h = size.h * sel.mult;
       const px = 1 / ppp; // 1 设备像素
       ctx.save();
@@ -217,7 +244,7 @@ export function StampSurface({
       if (!s.active || !ghost || s.mode !== "stamp") {
         tip.style.opacity = "0";
       } else {
-        const b = stampBounds(s.active.text, s.active.design);
+        const b = stampSpecBounds({ ...s.active, rotation: s.active.image ? 0 : (s.active.design?.rotation ?? 0) });
         const c = keptInside(ghost.x, ghost.y, b.w * s.mult, b.h * s.mult);
         const below = c.y < s.pageH * 0.62; // 章在纸上半部时，提示放下面
         const p = pxPerPt();
@@ -228,9 +255,11 @@ export function StampSurface({
       }
     }
     if (s.active && ghost && s.mode === "stamp") {
-      const bounds = stampBounds(s.active.text, s.active.design);
+      const bounds = stampSpecBounds({ ...s.active, rotation: s.active.image ? 0 : (s.active.design?.rotation ?? 0) });
       const target = keptInside(ghost.x, ghost.y, bounds.w * s.mult, bounds.h * s.mult);
-      const { canvas: layer, ppp: q } = getLayer(s.active.text, s.active.design, s.mult, ppp);
+      const { canvas: layer, ppp: q } = s.active.image
+        ? getCustomImageLayer(s.active.image.imageId, s.mult, ppp)
+        : getLayer(s.active.text!, s.active.design!, s.mult, ppp);
       ctx.save();
       ctx.globalAlpha = 0.82;
       drawLayerAt(ctx, layer, target.x, target.y, q);
@@ -303,7 +332,7 @@ export function StampSurface({
       const slop = 4 / p;
       for (let i = stamps.length - 1; i >= 0; i--) {
         const st = stamps[i];
-        const size = stampSize(st.text, st.design);
+        const size = stampSpecSize(st);
         const w = size.w * st.mult + slop, h = size.h * st.mult + slop;
         const dx = pt.x - st.relX * pageW, dy = pt.y - st.relY * pageH;
         const a = (st.rotation * Math.PI) / 180;
@@ -330,7 +359,7 @@ export function StampSurface({
           const wx = d.grabLX * Math.cos(a) - d.grabLY * Math.sin(a);
           const wy = d.grabLX * Math.sin(a) + d.grabLY * Math.cos(a);
           const nx = pt.x - wx, ny = pt.y - wy;
-          const bounds = stampBounds(st.text, { ...st.design, rotation: st.rotation });
+          const bounds = stampSpecBounds({ ...st });
           const c = keptInside(nx, ny, bounds.w, bounds.h);
           onMoveStamp?.(d.id, c.x / pageW, c.y / pageH);
         } else if (d.kind === "scale") {
@@ -360,10 +389,10 @@ export function StampSurface({
   const stampAtPt = useCallback(
     (pt: { x: number; y: number }) => {
       if (!active) return;
-      const bounds = stampBounds(active.text, active.design);
+      const bounds = stampSpecBounds({ ...active, rotation: active.image ? 0 : (active.design?.rotation ?? 0) });
       const c = keptInside(pt.x, pt.y, bounds.w * mult, bounds.h * mult);
       onStamp?.(c.x / pageW, c.y / pageH);
-      const size = stampSize(active.text, active.design);
+      const size = stampSpecSize(active);
       rippleSeq.current += 1;
       const rid = rippleSeq.current;
       setRipples((r) => [...r.slice(-5), { id: rid, x: c.x, y: c.y, w: size.w * mult, h: size.h * mult }]);
