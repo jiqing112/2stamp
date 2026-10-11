@@ -105,11 +105,17 @@ export default function App() {
       )}
       <Toaster
         position="top-center"
+        visibleToasts={2}
         toastOptions={{
           style: {
-            background: "rgba(36,33,32,0.96)",
-            color: "#FBF9F5",
-            border: "none",
+            background: "#FFFCF6",
+            color: "#242120",
+            border: "1px solid rgba(201,51,41,0.22)",
+            boxShadow: "0 2px 6px rgba(36,33,32,0.10), 0 16px 36px -12px rgba(36,33,32,0.28)",
+          },
+          classNames: {
+            title: "!text-[#242120] !font-medium",
+            description: "!text-[#8a7f72]",
           },
         }}
       />
