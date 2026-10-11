@@ -1,0 +1,87 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 40 33% 97%;
+    --foreground: 24 10% 12%;
+    --card: 40 38% 99%;
+    --card-foreground: 24 10% 12%;
+    --popover: 40 38% 99%;
+    --popover-foreground: 24 10% 12%;
+    --primary: 5 68% 47%;
+    --primary-foreground: 40 40% 98%;
+    --secondary: 38 22% 91%;
+    --secondary-foreground: 24 10% 18%;
+    --muted: 38 22% 92%;
+    --muted-foreground: 28 8% 42%;
+    --accent: 16 74% 95%;
+    --accent-foreground: 5 68% 40%;
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 35 18% 86%;
+    --input: 35 18% 84%;
+    --ring: 5 68% 47%;
+    --radius: 0.75rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    text-rendering: optimizeLegibility;
+    font-feature-settings: "tnum";
+  }
+
+  ::selection {
+    background: hsl(5 68% 47% / 0.16);
+  }
+}
+
+@layer utilities {
+  /* 纸张纹理：极淡的噪点 + 横向纹 */
+  .paper-grain {
+    background-image:
+      radial-gradient(rgba(36, 33, 32, 0.028) 1px, transparent 1px),
+      radial-gradient(rgba(36, 33, 32, 0.02) 1px, transparent 1px);
+    background-size: 24px 24px, 17px 17px;
+    background-position: 0 0, 9px 7px;
+  }
+  .desk-grain {
+    background-image:
+      radial-gradient(rgba(36, 33, 32, 0.05) 1px, transparent 1px),
+      linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0));
+    background-size: 22px 22px, 100% 240px;
+  }
+  .squiggle {
+    position: relative;
+    white-space: nowrap;
+  }
+  .squiggle::after {
+    content: "";
+    position: absolute;
+    left: -2%;
+    right: -2%;
+    bottom: -0.06em;
+    height: 0.14em;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 12' preserveAspectRatio='none'%3E%3Cpath d='M2 8 Q 12 2 24 7 T 46 7 T 68 7 T 90 7 T 118 6' fill='none' stroke='%23C93329' stroke-width='3.4' stroke-linecap='round' opacity='.75'/%3E%3C/svg%3E");
+    background-size: 100% 100%;
+  }
+  .tnum { font-variant-numeric: tabular-nums; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
